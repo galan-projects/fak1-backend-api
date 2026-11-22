@@ -1,0 +1,82 @@
+# managed by tornae-tfmodules-platform/modules/github//modules/repo-files
+# cd — manual deploy-by-dispatch. THIN caller: deploy mechanics live
+# in shared-workflows (cd-k8s). Fill in the coordinates case arm for
+# your service(s) before first use; until then every dispatch fails
+# closed at the coordinates step.
+name: cd
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to deploy"
+        required: true
+        type: string
+      tag:
+        description: "Release tag to deploy (e.g. v0.1.0)"
+        required: true
+        type: string
+      environment:
+        description: "Deploy gate"
+        required: true
+        type: environment
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: validate dispatch contract
+    runs-on: [self-hosted, Linux, X64, ci]
+    timeout-minutes: 3
+    outputs:
+      deploy-target: ${{ steps.coords.outputs.deploy-target }}
+      image-registry-path: ${{ steps.coords.outputs.image-registry-path }}
+    steps:
+      - name: Tag must be a release tag (pre-approval, fail-closed)
+        env:
+          TAG: ${{ inputs.tag }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$$' || {
+            echo "::error::tag '$TAG' is not a release tag (^vX.Y.Z$$) — refusing to dispatch"
+            exit 1
+          }
+          echo "dispatch contract OK: service=$SERVICE tag=$TAG"
+      - name: Resolve service deploy coordinates
+        id: coords
+        env:
+          SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          case "$SERVICE" in
+            # example-arm:
+            #   echo "deploy-target=dev/<tenant>/<app>/values.yaml" >> "$GITHUB_OUTPUT"
+            #   echo "image-registry-path=<registry>/<project>/<image>" >> "$GITHUB_OUTPUT"
+            #   ;;
+            *)
+              echo "::error::service '$SERVICE' has no deploy coordinates — add a case arm in cd.yaml"
+              exit 1
+              ;;
+          esac
+  gate:
+    name: environment gate
+    needs: [validate]
+    environment: ${{ inputs.environment }}
+    runs-on: [self-hosted, Linux, X64, ci]
+    timeout-minutes: 3
+    steps:
+      - run: echo "gate open for ${{ inputs.service }}@${{ inputs.tag }} (${{ inputs.environment }})"
+  deploy:
+    name: open deploy PR (cd-k8s)
+    needs: [gate]
+    uses: galan-projects/shared-workflows/.github/workflows/cd-k8s.yml@main
+    with:
+      service: ${{ inputs.service }}
+      tag: ${{ inputs.tag }}
+      digest: ""
+      repo: galan-projects/tornae-values-platform
+      deploy-target: ${{ needs.validate.outputs.deploy-target }}
+      image-registry-path: ${{ needs.validate.outputs.image-registry-path }}
+      pr-label: manual-dispatch
+      kanban-task: ""
+    secrets:
+      cd-token: ${{ secrets.GH_TF_TOKEN }}
